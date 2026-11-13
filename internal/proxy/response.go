@@ -97,6 +97,7 @@ type sseReader struct {
 	out        []byte
 	err        error
 	sawContent bool
+	scanned    int // bytes of pending already searched for an event end
 }
 
 func newSSEReader(src io.ReadCloser, obs *observation, dropUsage bool) *sseReader {
@@ -130,10 +131,14 @@ func (s *sseReader) Close() error { return s.src.Close() }
 func (s *sseReader) process(b []byte) {
 	s.pending = append(s.pending, b...)
 	for {
-		end, sepLen := eventEnd(s.pending)
+		end, sepLen := eventEnd(s.pending, s.scanned)
 		if end < 0 {
+			// Resume next time just before the tail, in case a separator
+			// is split across reads.
+			s.scanned = max(0, len(s.pending)-2)
 			return
 		}
+		s.scanned = 0
 		ev := s.pending[:end+sepLen]
 		if s.observe(s.pending[:end]) {
 			s.out = append(s.out, ev...)
@@ -142,12 +147,15 @@ func (s *sseReader) process(b []byte) {
 	}
 }
 
-// eventEnd finds the blank line terminating the first SSE event.
-func eventEnd(b []byte) (int, int) {
-	for i := 0; i < len(b); i++ {
-		if b[i] != '\n' {
-			continue
+// eventEnd finds the blank line terminating the first SSE event, starting
+// the search at from.
+func eventEnd(b []byte, from int) (int, int) {
+	for i := from; i < len(b); i++ {
+		j := bytes.IndexByte(b[i:], '\n')
+		if j < 0 {
+			return -1, 0
 		}
+		i += j
 		if i+1 < len(b) && b[i+1] == '\n' {
 			return i, 2
 		}

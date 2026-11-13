@@ -386,3 +386,46 @@ func TestUpstreamIgnoresEnvProxy(t *testing.T) {
 		t.Fatal("upstream transport must not use HTTP(S)_PROXY")
 	}
 }
+
+type chunkReader struct {
+	s string
+	n int
+}
+
+func (r *chunkReader) Read(p []byte) (int, error) {
+	if r.s == "" {
+		return 0, io.EOF
+	}
+	k := min(r.n, len(r.s), len(p))
+	copy(p, r.s[:k])
+	r.s = r.s[k:]
+	return k, nil
+}
+
+func TestSSESeparatorSplitAtEveryOffset(t *testing.T) {
+	src := "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\r\n\r\n" +
+		"data: {\"choices\":[],\"usage\":{\"completion_tokens\":2}}\n\ndata: [DONE]\n\n"
+	for n := 1; n <= len(src); n++ {
+		obs := &observation{}
+		out, _ := io.ReadAll(newSSEReader(io.NopCloser(&chunkReader{s: src, n: n}), obs, true))
+		want := "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\r\n\r\ndata: [DONE]\n\n"
+		if string(out) != want || obs.usage == nil || obs.respBytes != 2 {
+			t.Fatalf("chunk %d: %q", n, out)
+		}
+	}
+}
+
+// A single huge event delivered in small reads must be processed in linear
+// time (previously every read rescanned the whole pending buffer).
+func TestSSELargeEventLinear(t *testing.T) {
+	big := "data: {\"choices\":[{\"delta\":{\"content\":\"" + strings.Repeat("x", 8<<20) + "\"}}]}\n\n"
+	start := time.Now()
+	obs := &observation{}
+	out, _ := io.ReadAll(newSSEReader(io.NopCloser(&chunkReader{s: big, n: 4096}), obs, false))
+	if len(out) != len(big) || obs.respBytes != 8<<20 {
+		t.Fatal(len(out), obs.respBytes)
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("too slow: %v", d)
+	}
+}
