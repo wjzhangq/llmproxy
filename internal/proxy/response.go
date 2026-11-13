@@ -166,50 +166,92 @@ func eventEnd(b []byte, from int) (int, int) {
 	return -1, 0
 }
 
-// observe inspects one event and reports whether it should be forwarded.
-func (s *sseReader) observe(ev []byte) bool {
+// eventData returns the concatenated "data:" field of an SSE event. It only
+// allocates when the event has several data lines.
+func eventData(ev []byte) []byte {
 	var data []byte
-	for _, line := range bytes.Split(ev, []byte("\n")) {
+	lines := 0
+	for len(ev) > 0 {
+		line := ev
+		if i := bytes.IndexByte(ev, '\n'); i >= 0 {
+			line, ev = ev[:i], ev[i+1:]
+		} else {
+			ev = nil
+		}
 		line = bytes.TrimSuffix(line, []byte("\r"))
-		if v, ok := bytes.CutPrefix(line, []byte("data:")); ok {
-			v = bytes.TrimPrefix(v, []byte(" "))
-			if data != nil {
-				data = append(data, '\n')
-			}
-			data = append(data, v...)
+		v, ok := bytes.CutPrefix(line, []byte("data:"))
+		if !ok {
+			continue
+		}
+		v = bytes.TrimPrefix(v, []byte(" "))
+		lines++
+		switch lines {
+		case 1:
+			data = v
+		case 2:
+			data = append(append(append([]byte(nil), data...), '\n'), v...)
+		default:
+			data = append(append(data, '\n'), v...)
 		}
 	}
+	return data
+}
+
+// observe inspects one event and reports whether it should be forwarded.
+func (s *sseReader) observe(ev []byte) bool {
+	data := eventData(ev)
 	if len(data) == 0 || string(data) == "[DONE]" {
 		return true
 	}
-	var c streamChunk
-	if json.Unmarshal(data, &c) != nil {
-		return true
-	}
-	if c.Error != nil && s.obs.errMsg == "" {
-		s.obs.errMsg = c.Error.msg
-	}
-	var n int64
-	for _, ch := range c.Choices {
-		d := ch.Delta
-		reasoning := d.ReasoningContent
-		if reasoning == "" {
-			reasoning = d.Reasoning
-		}
-		n += int64(len(d.Content)+len(reasoning)+len(ch.Text)) + toolBytes(d.ToolCalls)
-		if !s.sawContent && (d.Content != "" || reasoning != "" || len(d.ToolCalls) > 0 || ch.Text != "") {
-			s.sawContent = true
-			s.obs.firstToken = time.Now()
+	info, ok := scanChunk(data)
+	if !ok || info.hasError {
+		info, ok = slowChunk(data, s.obs)
+		if !ok {
+			return true
 		}
 	}
-	s.obs.respBytes += n
-	if c.Usage != nil {
-		s.obs.usage = c.Usage
-		if s.dropUsage && len(c.Choices) == 0 {
+	s.obs.respBytes += info.contentBytes
+	if !s.sawContent && info.hasContent {
+		s.sawContent = true
+		s.obs.firstToken = time.Now()
+	}
+	if info.hasUsage {
+		u := info.usage
+		s.obs.usage = &u
+		if s.dropUsage && info.choices == 0 {
 			return false
 		}
 	}
 	return true
+}
+
+// slowChunk is the encoding/json fallback of scanChunk; it also extracts
+// error messages.
+func slowChunk(data []byte, obs *observation) (chunkInfo, bool) {
+	var c streamChunk
+	if json.Unmarshal(data, &c) != nil {
+		return chunkInfo{}, false
+	}
+	if c.Error != nil && obs.errMsg == "" {
+		obs.errMsg = c.Error.msg
+	}
+	info := chunkInfo{choices: len(c.Choices), hasError: c.Error != nil}
+	for _, ch := range c.Choices {
+		d := ch.Delta
+		reasoning := d.ReasoningContent
+		if len(d.Reasoning) > len(reasoning) {
+			reasoning = d.Reasoning
+		}
+		info.contentBytes += int64(len(d.Content)+len(reasoning)+len(ch.Text)) + toolBytes(d.ToolCalls)
+		if d.Content != "" || reasoning != "" || len(d.ToolCalls) > 0 || ch.Text != "" {
+			info.hasContent = true
+		}
+	}
+	if c.Usage != nil {
+		info.hasUsage = true
+		info.usage = *c.Usage
+	}
+	return info, true
 }
 
 // teeReader copies up to limit bytes of a non-streaming body aside.
