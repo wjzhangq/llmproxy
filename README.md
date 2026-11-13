@@ -88,6 +88,8 @@ llmproxy --version
 
 每天 `report.cron`（默认 00:10）统计前一天：先从 metrics 文件算出确定的统计数据 `reports/DATE.json`（总体、模型 × 是否流式的 avg/P50/P95/P99/max、两种 token/s 口径、按小时、按请求大小分桶、Top 10 最慢请求），再把它和前 7 天的统计 JSON 交给大模型写成 `reports/DATE.md`。大模型默认直接用被代理的后端（`report.llm_base_url` / `report.llm_model` 可改），提示词见 [`internal/report/prompts/default.md`](internal/report/prompts/default.md)，可用 `report.prompt_file` 覆盖。调用失败时仍生成统计 JSON，并输出标注“AI 分析失败”的模板摘要。
 
+统计是边读边汇总的，每个请求只保留计算分位数所需的几个数值（50 万请求约 40 MB 内存）。如不希望在代理进程内跑统计，可设 `report.enabled: false`，改由系统 cron 执行 `llmproxy report -c <配置文件>`（不带 `--date` 时统计前一天）。
+
 ## 开发
 
 ```bash

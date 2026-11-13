@@ -56,11 +56,11 @@ func Generate(ctx context.Context, day string, o Options) (*Result, error) {
 	if _, err := time.ParseInLocation("2006-01-02", day, o.Location); err != nil {
 		return nil, fmt.Errorf("invalid date %q, want YYYY-MM-DD", day)
 	}
-	recs, err := ReadRecords(o.Dir, day)
-	if err != nil && !errors.Is(err, ErrNoData) {
+	agg := NewAggregator(o.Location)
+	if err := scanDay(o.Dir, day, agg.Add); err != nil && !errors.Is(err, ErrNoData) {
 		return nil, err
 	}
-	stats := Compute(recs, day, o.Location, logstore.ReadDrops(o.Dir, day), o.Now())
+	stats := agg.Stats(day, logstore.ReadDrops(o.Dir, day), o.Now())
 
 	dir := filepath.Join(o.Dir, logstore.ReportsDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
