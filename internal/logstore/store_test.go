@@ -172,3 +172,47 @@ func TestSlowConsoleDoesNotBlockLogging(t *testing.T) {
 		t.Fatalf("metrics lines %d", len(lines))
 	}
 }
+
+func TestEncodeRequestBody(t *testing.T) {
+	s := &Store{opts: Options{MaxBodyBytes: 1 << 20, StripImages: true, Location: time.UTC}}
+	enc := func(body string) map[string]any {
+		var m map[string]any
+		line := s.encodeRequest(nil, &metrics.RequestLog{Body: []byte(body)})
+		if err := json.Unmarshal(line, &m); err != nil {
+			t.Fatalf("invalid line %s: %v", line, err)
+		}
+		return m
+	}
+	m := enc("{ \"a\" : [1, 2],\n \"t\": \"keep  spaces \\\" \\\"data:image/png;base64,AAAA\\\"\",\n \"u\": \"data:image/jpeg;base64,/9j/4AA=\", \"v\": \"data:text/plain,hi\" }")
+	body := m["body"].(map[string]any)
+	if body["t"] != `keep  spaces " "data:image/png;base64,AAAA"` {
+		t.Fatalf("text inside a string must not be stripped: %v", body["t"])
+	}
+	if body["u"] != "<base64 omitted mime=image/jpeg len=31>" || body["v"] != "data:text/plain,hi" {
+		t.Fatal(body)
+	}
+	if m := enc(`not json`); m["body"] != "not json" || m["truncated"] != false {
+		t.Fatal(m)
+	}
+	if m := enc(``); m["body"] != nil {
+		t.Fatal(m)
+	}
+}
+
+func FuzzCompactJSON(f *testing.F) {
+	f.Add(`{"a": [1, "x y", {"b": null}], "c": "data:image/png;base64,QUJD"}`)
+	f.Add(`"\\\"" `)
+	f.Fuzz(func(t *testing.T, s string) {
+		if !json.Valid([]byte(s)) {
+			return
+		}
+		var want bytes.Buffer
+		json.Compact(&want, []byte(s))
+		if got := compactJSON(nil, []byte(s), false); !bytes.Equal(got, want.Bytes()) {
+			t.Fatalf("%q: got %q want %q", s, got, want.Bytes())
+		}
+		if got := compactJSON(nil, []byte(s), true); !json.Valid(got) {
+			t.Fatalf("stripped output invalid: %q", got)
+		}
+	})
+}

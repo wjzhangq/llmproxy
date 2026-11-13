@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -43,21 +42,100 @@ func mask(v string) string {
 	return "****" + v[len(v)-4:]
 }
 
-// base64Image matches a JSON string holding a base64 data URL.
-var base64Image = regexp.MustCompile(`"data:([A-Za-z0-9.+\-/]*);base64,(?:[^"\\]|\\.)*"`)
+// StripImages replaces base64 data URL strings inside a JSON document with a
+// short placeholder carrying the MIME type and original length. The input
+// must be valid JSON; whitespace outside strings is removed as well.
+func StripImages(b []byte) []byte { return compactJSON(nil, b, true) }
 
-// StripImages replaces base64 data URLs inside a JSON document with a short
-// placeholder string carrying the MIME type and original length.
-func StripImages(b []byte) []byte {
-	if !bytes.Contains(b, []byte(";base64,")) {
-		return b
+// compactJSON appends src (valid JSON) to dst without insignificant
+// whitespace, optionally replacing base64 data URL strings.
+func compactJSON(dst, src []byte, strip bool) []byte {
+	for i := 0; i < len(src); {
+		switch c := src[i]; c {
+		case ' ', '\t', '\n', '\r':
+			i++
+		case '"':
+			end := stringEnd(src, i)
+			str := src[i:end]
+			if strip {
+				if mime, ok := dataURLMime(str); ok {
+					dst = append(dst, `"<base64 omitted mime=`...)
+					dst = append(dst, mime...)
+					dst = append(dst, ` len=`...)
+					dst = strconv.AppendInt(dst, int64(len(str)-2), 10)
+					dst = append(dst, `>"`...)
+					i = end
+					continue
+				}
+			}
+			dst = append(dst, str...)
+			i = end
+		default:
+			j := i + 1
+			for j < len(src) {
+				c := src[j]
+				if c == '"' || c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+					break
+				}
+				j++
+			}
+			dst = append(dst, src[i:j]...)
+			i = j
+		}
 	}
-	return base64Image.ReplaceAllFunc(b, func(m []byte) []byte {
-		sub := base64Image.FindSubmatch(m)
-		return []byte(`"<base64 omitted mime=` + string(sub[1]) + ` len=` + strconv.Itoa(len(m)-2) + `>"`)
-	})
+	return dst
 }
 
+// stringEnd returns the index just past the string starting at src[i].
+func stringEnd(src []byte, i int) int {
+	j := i + 1
+	for {
+		k := bytes.IndexByte(src[j:], '"')
+		if k < 0 {
+			return len(src)
+		}
+		j += k
+		// The quote is escaped if preceded by an odd number of backslashes.
+		bs := 0
+		for p := j - 1; p > i && src[p] == '\\'; p-- {
+			bs++
+		}
+		j++
+		if bs%2 == 0 {
+			return j
+		}
+	}
+}
+
+var (
+	dataPrefix   = []byte(`"data:`)
+	base64Marker = []byte(";base64,")
+)
+
+// dataURLMime reports whether the quoted JSON string str is a base64 data URL
+// and returns its MIME type.
+func dataURLMime(str []byte) ([]byte, bool) {
+	if !bytes.HasPrefix(str, dataPrefix) {
+		return nil, false
+	}
+	head := str[len(dataPrefix):]
+	if len(head) > 128 {
+		head = head[:128]
+	}
+	k := bytes.Index(head, base64Marker)
+	if k < 0 {
+		return nil, false
+	}
+	mime := head[:k]
+	for _, c := range mime {
+		if !mimeChar(c) {
+			return nil, false
+		}
+	}
+	return mime, true
+}
+
+// requestLine holds the fields written before "body".
 type requestLine struct {
 	RequestID string            `json:"request_id"`
 	StartTime string            `json:"start_time"`
@@ -65,16 +143,14 @@ type requestLine struct {
 	Method    string            `json:"method"`
 	Path      string            `json:"path"`
 	Headers   map[string]string `json:"headers"`
-	Body      json.RawMessage   `json:"body"`
 	BodyBytes int               `json:"body_bytes"`
 	Truncated bool              `json:"truncated"`
 }
 
-func (s *Store) encodeRequest(r *metrics.RequestLog) []byte {
-	body := r.Body
-	if s.opts.StripImages {
-		body = StripImages(body)
-	}
+// encodeRequest appends one requests/*.jsonl line (without newline) to dst.
+// The body is scanned at most twice (validation, then compaction with
+// optional image stripping) and embedded without re-encoding.
+func (s *Store) encodeRequest(dst []byte, r *metrics.RequestLog) []byte {
 	line := requestLine{
 		RequestID: r.RequestID,
 		StartTime: r.StartTime.In(s.opts.Location).Format(metrics.TimeFormat),
@@ -84,27 +160,41 @@ func (s *Store) encodeRequest(r *metrics.RequestLog) []byte {
 		Headers:   MaskHeaders(r.Header),
 		BodyBytes: len(r.Body),
 	}
+	body := r.Body
+	valid := len(body) > 0 && json.Valid(body)
 	max := s.opts.MaxBodyBytes
-	switch {
-	case max > 0 && int64(len(body)) > max:
-		line.Truncated = true
-		prefix := body[:max]
-		for len(prefix) > 0 && !utf8.Valid(prefix) {
-			prefix = prefix[:len(prefix)-1]
-		}
-		line.Body, _ = json.Marshal(string(prefix))
-	case len(body) == 0:
-		line.Body = json.RawMessage("null")
-	case json.Valid(body):
-		var buf bytes.Buffer
-		if json.Compact(&buf, body) == nil {
-			line.Body = buf.Bytes()
-		} else {
-			line.Body = body
-		}
-	default:
-		line.Body, _ = json.Marshal(string(body))
+	var compact []byte
+	if valid {
+		compact = compactJSON(make([]byte, 0, min(len(body), int(max)+64)), body, s.opts.StripImages)
+		body = compact
 	}
-	b, _ := json.Marshal(&line)
-	return b
+	if max > 0 && int64(len(body)) > max {
+		line.Truncated = true
+		valid = false
+		body = body[:max]
+		for len(body) > 0 && !utf8.Valid(body) {
+			body = body[:len(body)-1]
+		}
+	}
+	head, _ := json.Marshal(&line)
+	dst = append(dst, head[:len(head)-1]...)
+	dst = append(dst, `,"body":`...)
+	switch {
+	case len(r.Body) == 0:
+		dst = append(dst, "null"...)
+	case valid:
+		dst = append(dst, body...)
+	default:
+		str, _ := json.Marshal(string(body))
+		dst = append(dst, str...)
+	}
+	return append(dst, '}')
+}
+
+func mimeChar(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	}
+	return c == '.' || c == '+' || c == '-' || c == '/'
 }

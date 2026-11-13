@@ -82,6 +82,7 @@ type Store struct {
 	requestsF   *dayFile
 	dropBase    int64 // value of dropped when the current day started
 	dropWritten int64 // drops last persisted for the current day
+	lineBuf     []byte
 }
 
 type dayFile struct {
@@ -244,8 +245,12 @@ func (s *Store) write(e entry) {
 		}
 	}
 	if s.requestsF != nil && e.req != nil {
-		s.requestsF.w.Write(s.encodeRequest(e.req))
+		s.lineBuf = s.encodeRequest(s.lineBuf[:0], e.req)
+		s.requestsF.w.Write(s.lineBuf)
 		s.requestsF.w.WriteByte('\n')
+		if cap(s.lineBuf) > 1<<20 {
+			s.lineBuf = nil // do not pin a huge buffer between requests
+		}
 	}
 	if s.console != nil {
 		select {
