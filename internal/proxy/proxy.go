@@ -51,7 +51,9 @@ func New(opts Options) *Proxy {
 		opts.ErrorLog = log.New(os.Stderr, "llmproxy: ", log.LstdFlags)
 	}
 	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
+		// Never route upstream traffic through HTTP(S)_PROXY: the upstream is
+		// normally a private inference server.
+		Proxy: nil,
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,

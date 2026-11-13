@@ -378,3 +378,11 @@ func (r *slowReader) Read(p []byte) (int, error) {
 	r.s = r.s[n:]
 	return n, nil
 }
+
+func TestUpstreamIgnoresEnvProxy(t *testing.T) {
+	u, _ := url.Parse("http://10.0.0.5:8000")
+	p := New(Options{Upstream: u, UpstreamModel: "m"})
+	if tr := p.rp.Transport.(*http.Transport); tr.Proxy != nil {
+		t.Fatal("upstream transport must not use HTTP(S)_PROXY")
+	}
+}
