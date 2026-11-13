@@ -97,6 +97,9 @@ func runServe(cfg *config.Config, stdout, stderr io.Writer) int {
 	if d := store.Dropped(); d > 0 {
 		logf("%d log records dropped since start", d)
 	}
+	if d := store.ConsoleDropped(); d > 0 {
+		logf("%d console stats lines skipped (stdout too slow)", d)
+	}
 	return code
 }
 

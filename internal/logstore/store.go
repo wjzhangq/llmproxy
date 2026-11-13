@@ -32,7 +32,12 @@ type Options struct {
 	Console       io.Writer // nil disables console stats
 	ErrorLog      func(format string, args ...any)
 	now           func() time.Time
+	beforeWrite   func() // test hook
 }
+
+// consoleQueue is the number of console lines buffered before new ones are
+// dropped; a slow stdout must never stall log writing.
+const consoleQueue = 4096
 
 type entry struct {
 	rec  *metrics.Record
@@ -67,6 +72,10 @@ type Store struct {
 	done    chan struct{}
 	dropped atomic.Int64
 	queued  atomic.Int64 // bytes currently held by queued entries
+
+	console        chan string
+	consoleDone    chan struct{}
+	consoleDropped atomic.Int64
 
 	day         string
 	metricsF    *dayFile
@@ -111,6 +120,11 @@ func Open(opts Options) (*Store, error) {
 	}
 	s := &Store{opts: opts, ch: make(chan entry, opts.QueueSize), done: make(chan struct{})}
 	s.housekeep(s.today())
+	if opts.Console != nil {
+		s.console = make(chan string, consoleQueue)
+		s.consoleDone = make(chan struct{})
+		go s.runConsole()
+	}
 	go s.run()
 	return s, nil
 }
@@ -154,13 +168,30 @@ func (s *Store) Close() error {
 	}
 	s.mu.Unlock()
 	<-s.done
+	if s.console != nil {
+		<-s.consoleDone
+	}
 	return nil
+}
+
+// ConsoleDropped returns the number of console lines skipped because stdout
+// could not keep up.
+func (s *Store) ConsoleDropped() int64 { return s.consoleDropped.Load() }
+
+func (s *Store) runConsole() {
+	defer close(s.consoleDone)
+	for line := range s.console {
+		_, _ = io.WriteString(s.opts.Console, line)
+	}
 }
 
 func (s *Store) today() string { return s.opts.now().In(s.opts.Location).Format("2006-01-02") }
 
 func (s *Store) run() {
 	defer close(s.done)
+	if s.console != nil {
+		defer close(s.console)
+	}
 	tick := time.NewTicker(time.Minute)
 	defer tick.Stop()
 	for {
@@ -198,6 +229,9 @@ func (s *Store) run() {
 
 func (s *Store) write(e entry) {
 	defer s.queued.Add(-e.size)
+	if s.opts.beforeWrite != nil {
+		s.opts.beforeWrite()
+	}
 	day := e.end.In(s.opts.Location).Format("2006-01-02")
 	if day != s.day {
 		s.rotate(day)
@@ -213,8 +247,12 @@ func (s *Store) write(e entry) {
 		s.requestsF.w.Write(s.encodeRequest(e.req))
 		s.requestsF.w.WriteByte('\n')
 	}
-	if s.opts.Console != nil {
-		fmt.Fprintln(s.opts.Console, metrics.ConsoleLine(e.rec, e.end, s.opts.Location))
+	if s.console != nil {
+		select {
+		case s.console <- metrics.ConsoleLine(e.rec, e.end, s.opts.Location) + "\n":
+		default:
+			s.consoleDropped.Add(1)
+		}
 	}
 }
 

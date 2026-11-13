@@ -94,10 +94,12 @@ type blockWriter struct{ ch chan struct{} }
 
 func (b *blockWriter) Write(p []byte) (int, error) { <-b.ch; return len(p), nil }
 
+func (b *blockWriter) wait() { <-b.ch }
+
 func TestQueueFullDrops(t *testing.T) {
 	dir := t.TempDir()
 	bw := &blockWriter{ch: make(chan struct{})}
-	s, _ := Open(Options{Dir: dir, QueueSize: 2, Console: bw})
+	s, _ := Open(Options{Dir: dir, QueueSize: 2, beforeWrite: bw.wait})
 	rec := &metrics.Record{RequestID: "x", StartTime: time.Now()}
 	start := time.Now()
 	for i := 0; i < 20; i++ {
@@ -132,7 +134,7 @@ func TestRetention(t *testing.T) {
 func TestQueueBytesLimit(t *testing.T) {
 	dir := t.TempDir()
 	bw := &blockWriter{ch: make(chan struct{})}
-	s, _ := Open(Options{Dir: dir, QueueSize: 1000, QueueBytes: 3 << 20, Console: bw})
+	s, _ := Open(Options{Dir: dir, QueueSize: 1000, QueueBytes: 3 << 20, beforeWrite: bw.wait})
 	rec := &metrics.Record{RequestID: "x", StartTime: time.Now()}
 	big := make([]byte, 1<<20)
 	for i := 0; i < 10; i++ {
@@ -146,5 +148,27 @@ func TestQueueBytesLimit(t *testing.T) {
 	s.Close()
 	if s.QueuedBytes() != 0 {
 		t.Fatalf("queued bytes not released: %d", s.QueuedBytes())
+	}
+}
+
+func TestSlowConsoleDoesNotBlockLogging(t *testing.T) {
+	dir := t.TempDir()
+	bw := &blockWriter{ch: make(chan struct{})}
+	s, _ := Open(Options{Dir: dir, QueueSize: 10, Console: bw})
+	rec := &metrics.Record{RequestID: "x", StartTime: time.Now()}
+	for i := 0; i < consoleQueue+200; i++ {
+		s.Submit(rec, nil)
+		for s.QueuedBytes() > 5*entryOverhead { // let the writer keep up
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if s.Dropped() != 0 || s.ConsoleDropped() == 0 {
+		t.Fatalf("dropped=%d consoleDropped=%d", s.Dropped(), s.ConsoleDropped())
+	}
+	close(bw.ch)
+	s.Close()
+	lines := readLines(t, dir, "metrics", time.Now().Format("2006-01-02"))
+	if len(lines) != consoleQueue+200 {
+		t.Fatalf("metrics lines %d", len(lines))
 	}
 }
