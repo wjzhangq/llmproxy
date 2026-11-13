@@ -24,13 +24,6 @@ llmproxy report -c /etc/llmproxy/config.yaml --date 2026-11-12
 llmproxy --version
 ```
 
-Docker：
-
-```bash
-docker run -d -p 8080:8080 -v $PWD/data:/data ghcr.io/wjzhangq/llmproxy:latest \
-  --upstream http://10.0.0.5:8000 --model qwen3-32b
-```
-
 客户端把 `base_url` 指向代理即可，例如 `http://proxy:8080/v1`。
 
 ### 命令行参数
@@ -102,4 +95,4 @@ golangci-lint run
 go build ./cmd/llmproxy
 ```
 
-推送 `v*` tag（如 `v0.1.0`）触发 GitHub Actions：vet、golangci-lint、`go test -race` 通过后用 GoReleaser 构建 linux/amd64、linux/arm64 二进制（附 SHA256 校验和 changelog）发布到 GitHub Release，并推送多架构镜像 `ghcr.io/<owner>/llmproxy:vX.Y.Z` 与 `:latest`。普通 push 和 PR 只跑 lint 与单元测试。
+推送 `v*` tag（如 `v0.1.0`）触发 GitHub Actions：vet、golangci-lint、`go test -race` 通过后用 GoReleaser 构建 linux/amd64、linux/arm64、darwin/amd64、darwin/arm64 四个静态二进制包（`llmproxy_<版本>_<os>_<arch>.tar.gz`，附 SHA256 校验和 changelog）发布到 GitHub Release。普通 push 和 PR 只跑 lint 与单元测试。
