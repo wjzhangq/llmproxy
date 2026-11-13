@@ -165,6 +165,7 @@ func (s *Store) write(e entry) {
 	if day != s.day {
 		s.rotate(day)
 	}
+	e.rec.StartTime = e.rec.StartTime.In(s.opts.Location)
 	if s.metricsF != nil {
 		if b, err := json.Marshal(e.rec); err == nil {
 			s.metricsF.w.Write(b)

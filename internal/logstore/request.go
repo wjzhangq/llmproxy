@@ -77,7 +77,7 @@ func (s *Store) encodeRequest(r *metrics.RequestLog) []byte {
 	}
 	line := requestLine{
 		RequestID: r.RequestID,
-		StartTime: r.StartTime.Format(metrics.TimeFormat),
+		StartTime: r.StartTime.In(s.opts.Location).Format(metrics.TimeFormat),
 		ClientIP:  r.ClientIP,
 		Method:    r.Method,
 		Path:      r.Path,
