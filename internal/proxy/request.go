@@ -1,66 +1,9 @@
 package proxy
 
 import (
-	"bytes"
 	"encoding/json"
-	"errors"
-	"io"
+	"sort"
 )
-
-// member is one top-level key of a JSON object, in original order.
-type member struct {
-	key string
-	raw json.RawMessage
-}
-
-// parseObject decodes a JSON object while keeping key order.
-func parseObject(b []byte) ([]member, error) {
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.UseNumber()
-	tok, err := dec.Token()
-	if err != nil {
-		return nil, err
-	}
-	if d, ok := tok.(json.Delim); !ok || d != '{' {
-		return nil, errors.New("request body is not a JSON object")
-	}
-	var out []member
-	for dec.More() {
-		tok, err := dec.Token()
-		if err != nil {
-			return nil, err
-		}
-		key, _ := tok.(string)
-		var raw json.RawMessage
-		if err := dec.Decode(&raw); err != nil {
-			return nil, err
-		}
-		out = append(out, member{key, raw})
-	}
-	if _, err := dec.Token(); err != nil {
-		return nil, err
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		return nil, errors.New("trailing data after JSON object")
-	}
-	return out, nil
-}
-
-func encodeObject(ms []member) []byte {
-	var b bytes.Buffer
-	b.WriteByte('{')
-	for i, m := range ms {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		k, _ := json.Marshal(m.key)
-		b.Write(k)
-		b.WriteByte(':')
-		b.Write(m.raw)
-	}
-	b.WriteByte('}')
-	return b.Bytes()
-}
 
 // reqInfo is what the proxy learns from a tracked request body.
 type reqInfo struct {
@@ -73,126 +16,233 @@ type reqInfo struct {
 	forwardedBody []byte
 }
 
-// prepareRequest parses the client body once, extracts metrics, rewrites
-// "model" and (optionally) injects stream_options.include_usage. If the body
-// cannot be parsed it is forwarded unchanged.
-func prepareRequest(body []byte, path, upstreamModel string, injectUsage bool) reqInfo {
+// span is a byte range [start, end) of the body.
+type span struct{ start, end int }
+
+// reqScan holds the positions found by one pass over a request body.
+type reqScan struct {
+	open, close int // positions of the top-level '{' and '}'
+	members     int
+	model       *span
+	streamOpts  *span
+	soClose     int   // '}' of stream_options
+	soMembers   int   // members inside stream_options
+	soUsage     *span // value of stream_options.include_usage
+	soUsageTrue bool
+}
+
+// edit replaces body[start:end] with text.
+type edit struct {
+	start, end int
+	text       string
+}
+
+// prepareRequest walks the client body once: it extracts metrics, rewrites
+// "model" and (optionally) injects stream_options.include_usage. Only the
+// changed values are spliced in; every other byte is forwarded as sent. A
+// body that is not a JSON object is forwarded unchanged.
+func prepareRequest(body []byte, upstreamModel string, injectUsage bool) reqInfo {
 	info := reqInfo{forwardedBody: body}
-	ms, err := parseObject(body)
-	if err != nil {
+	var rs reqScan
+	s := scanner{b: body}
+	s.ws()
+	rs.open = s.i
+	ok := s.object(func(key []byte) bool {
+		rs.members++
+		start := s.peekPos()
+		var ok bool
+		switch string(key) {
+		case "model":
+			ok = s.skip()
+			rs.model = &span{start, s.i}
+			info.clientModel = ""
+			_ = json.Unmarshal(body[start:s.i], &info.clientModel)
+		case "stream":
+			ok = s.skip()
+			info.stream = string(body[start:s.i]) == "true"
+		case "stream_options":
+			ok = s.streamOptions(&rs)
+			rs.streamOpts = &span{start, s.i}
+		case "messages":
+			ok = s.messages(&info)
+		case "prompt":
+			ok = s.prompt(&info)
+		default:
+			ok = s.skip()
+		}
+		return ok
+	})
+	if !ok {
+		return info
+	}
+	rs.close = s.i - 1
+	s.ws()
+	if s.i != len(body) {
 		return info
 	}
 	info.parsed = true
-	modelIdx, soIdx := -1, -1
-	for i, m := range ms {
-		switch m.key {
-		case "model":
-			modelIdx = i
-			_ = json.Unmarshal(m.raw, &info.clientModel)
-		case "stream":
-			_ = json.Unmarshal(m.raw, &info.stream)
-		case "stream_options":
-			soIdx = i
-		case "messages":
-			info.contentBytes, info.imageCount = countMessages(m.raw)
-		case "prompt":
-			info.contentBytes = countPrompt(m.raw)
-		}
-	}
-	modelRaw, _ := json.Marshal(upstreamModel)
-	if modelIdx >= 0 {
-		ms[modelIdx].raw = modelRaw
+
+	modelJSON, _ := json.Marshal(upstreamModel)
+	var edits []edit
+	if rs.model != nil {
+		edits = append(edits, edit{rs.model.start, rs.model.end, string(modelJSON)})
 	} else {
-		ms = append([]member{{"model", modelRaw}}, ms...)
-		if soIdx >= 0 {
-			soIdx++
+		text := `"model":` + string(modelJSON)
+		if rs.members > 0 {
+			text += ","
 		}
+		edits = append(edits, edit{rs.open + 1, rs.open + 1, text})
+		rs.members++
 	}
 	if injectUsage && info.stream {
-		if soIdx < 0 {
-			ms = append(ms, member{"stream_options", json.RawMessage(`{"include_usage":true}`)})
+		switch {
+		case rs.streamOpts == nil:
+			edits = append(edits, edit{rs.close, rs.close, `,"stream_options":{"include_usage":true}`})
 			info.injected = true
-		} else if so, err := parseObject(ms[soIdx].raw); err == nil {
-			found := false
-			for i := range so {
-				if so[i].key == "include_usage" {
-					found = true
-					var v bool
-					if json.Unmarshal(so[i].raw, &v) == nil && !v {
-						so[i].raw = json.RawMessage("true")
-						info.injected = true
-					}
-				}
+		case string(body[rs.streamOpts.start:rs.streamOpts.end]) == "null":
+			edits = append(edits, edit{rs.streamOpts.start, rs.streamOpts.end, `{"include_usage":true}`})
+			info.injected = true
+		case rs.soClose > 0 && rs.soUsage == nil:
+			text := `"include_usage":true`
+			if rs.soMembers > 0 {
+				text = "," + text
 			}
-			if !found {
-				so = append(so, member{"include_usage", json.RawMessage("true")})
-				info.injected = true
-			}
-			ms[soIdx].raw = encodeObject(so)
-		} else if string(bytes.TrimSpace(ms[soIdx].raw)) == "null" {
-			ms[soIdx].raw = json.RawMessage(`{"include_usage":true}`)
+			edits = append(edits, edit{rs.soClose, rs.soClose, text})
+			info.injected = true
+		case rs.soUsage != nil && !rs.soUsageTrue:
+			edits = append(edits, edit{rs.soUsage.start, rs.soUsage.end, "true"})
 			info.injected = true
 		}
 	}
-	info.forwardedBody = encodeObject(ms)
+	info.forwardedBody = applyEdits(body, edits)
 	return info
 }
 
-type contentPart struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+func applyEdits(body []byte, edits []edit) []byte {
+	sort.SliceStable(edits, func(i, j int) bool { return edits[i].start < edits[j].start })
+	n := len(body)
+	for _, e := range edits {
+		n += len(e.text) - (e.end - e.start)
+	}
+	out := make([]byte, 0, n)
+	pos := 0
+	for _, e := range edits {
+		out = append(out, body[pos:e.start]...)
+		out = append(out, e.text...)
+		pos = e.end
+	}
+	return append(out, body[pos:]...)
 }
 
-// countMessages returns the UTF-8 byte count of text content and the number
-// of images in a chat "messages" array.
-func countMessages(raw json.RawMessage) (int64, int) {
-	var msgs []struct {
-		Content json.RawMessage `json:"content"`
+// peekPos returns the position of the next non-space byte.
+func (s *scanner) peekPos() int {
+	s.ws()
+	return s.i
+}
+
+func (s *scanner) streamOptions(rs *reqScan) bool {
+	if s.peek() != '{' {
+		return s.skip()
 	}
-	if json.Unmarshal(raw, &msgs) != nil {
-		return 0, 0
+	ok := s.object(func(key []byte) bool {
+		rs.soMembers++
+		if string(key) != "include_usage" {
+			return s.skip()
+		}
+		start := s.peekPos()
+		if !s.skip() {
+			return false
+		}
+		rs.soUsage = &span{start, s.i}
+		rs.soUsageTrue = string(s.b[start:s.i]) == "true"
+		return true
+	})
+	rs.soClose = s.i - 1
+	return ok
+}
+
+// messages counts text bytes and images of a chat "messages" array.
+func (s *scanner) messages(info *reqInfo) bool {
+	if s.peek() != '[' {
+		return s.skip()
 	}
-	var n int64
-	images := 0
-	for _, m := range msgs {
-		if len(m.Content) == 0 {
-			continue
+	return s.array(func() bool {
+		if s.peek() != '{' {
+			return s.skip()
 		}
-		var s string
-		if json.Unmarshal(m.Content, &s) == nil {
-			n += int64(len(s))
-			continue
-		}
-		var parts []contentPart
-		if json.Unmarshal(m.Content, &parts) != nil {
-			continue
-		}
-		for _, p := range parts {
-			switch p.Type {
-			case "text":
-				n += int64(len(p.Text))
-			case "image_url", "image", "input_image":
-				images++
+		return s.object(func(key []byte) bool {
+			if string(key) != "content" {
+				return s.skip()
 			}
-		}
-	}
-	return n, images
+			switch s.peek() {
+			case '"':
+				n, ok := s.str()
+				info.contentBytes += int64(n)
+				return ok
+			case '[':
+				return s.array(func() bool { return s.contentPart(info) })
+			}
+			return s.skip()
+		})
+	})
 }
 
-// countPrompt counts the bytes of a completions "prompt" (string or array of
-// strings).
-func countPrompt(raw json.RawMessage) int64 {
-	var s string
-	if json.Unmarshal(raw, &s) == nil {
-		return int64(len(s))
+// contentPart handles one element of a multimodal content array: only
+// type=text counts towards bytes, image parts are counted.
+func (s *scanner) contentPart(info *reqInfo) bool {
+	if s.peek() != '{' {
+		return s.skip()
 	}
-	var arr []string
-	if json.Unmarshal(raw, &arr) == nil {
-		var n int64
-		for _, v := range arr {
-			n += int64(len(v))
+	var typ []byte
+	textLen := 0
+	ok := s.object(func(key []byte) bool {
+		switch string(key) {
+		case "type":
+			if s.peek() != '"' {
+				return s.skip()
+			}
+			start := s.i + 1
+			if _, ok := s.str(); !ok {
+				return false
+			}
+			typ = s.b[start : s.i-1]
+			return true
+		case "text":
+			if s.peek() != '"' {
+				return s.skip()
+			}
+			n, ok := s.str()
+			textLen = n
+			return ok
 		}
-		return n
+		return s.skip()
+	})
+	switch string(typ) {
+	case "text":
+		info.contentBytes += int64(textLen)
+	case "image_url", "image", "input_image":
+		info.imageCount++
 	}
-	return 0
+	return ok
+}
+
+// prompt counts the bytes of a completions "prompt" (string or array of
+// strings).
+func (s *scanner) prompt(info *reqInfo) bool {
+	switch s.peek() {
+	case '"':
+		n, ok := s.str()
+		info.contentBytes += int64(n)
+		return ok
+	case '[':
+		return s.array(func() bool {
+			if s.peek() != '"' {
+				return s.skip()
+			}
+			n, ok := s.str()
+			info.contentBytes += int64(n)
+			return ok
+		})
+	}
+	return s.skip()
 }

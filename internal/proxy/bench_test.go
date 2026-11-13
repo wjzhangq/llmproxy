@@ -38,7 +38,7 @@ func BenchmarkPrepareRequestImage(b *testing.B) {
 	b.SetBytes(int64(len(body)))
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		prepareRequest(body, "/v1/chat/completions", "B", true)
+		prepareRequest(body, "B", true)
 	}
 }
 
@@ -47,6 +47,6 @@ func BenchmarkPrepareRequestText(b *testing.B) {
 	b.SetBytes(int64(len(body)))
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		prepareRequest(body, "/v1/chat/completions", "B", true)
+		prepareRequest(body, "B", true)
 	}
 }

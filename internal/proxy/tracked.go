@@ -52,7 +52,7 @@ func (p *Proxy) serveTracked(w http.ResponseWriter, r *http.Request) {
 		p.finish(st, r, body, start)
 		return
 	}
-	st.info = prepareRequest(body, r.URL.Path, p.opts.UpstreamModel, p.opts.InjectUsage)
+	st.info = prepareRequest(body, p.opts.UpstreamModel, p.opts.InjectUsage)
 
 	ctx := context.WithValue(r.Context(), ctxKey{}, st)
 	var cancel context.CancelFunc = func() {}

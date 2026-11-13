@@ -340,16 +340,16 @@ func TestPassthroughAndHealth(t *testing.T) {
 
 func TestPrepareRequestKeepsOrder(t *testing.T) {
 	in := `{"stream":true,"model":"x","stream_options":{"foo":1},"z":[1,2]}`
-	info := prepareRequest([]byte(in), "/v1/chat/completions", "B", true)
+	info := prepareRequest([]byte(in), "B", true)
 	want := `{"stream":true,"model":"B","stream_options":{"foo":1,"include_usage":true},"z":[1,2]}`
 	if string(info.forwardedBody) != want || !info.injected {
 		t.Fatalf("%s", info.forwardedBody)
 	}
-	info = prepareRequest([]byte(`{"prompt":["ab","c"]}`), "/v1/completions", "B", true)
+	info = prepareRequest([]byte(`{"prompt":["ab","c"]}`), "B", true)
 	if string(info.forwardedBody) != `{"model":"B","prompt":["ab","c"]}` || info.contentBytes != 3 {
 		t.Fatalf("%s", info.forwardedBody)
 	}
-	info = prepareRequest([]byte(`not json`), "/v1/completions", "B", true)
+	info = prepareRequest([]byte(`not json`), "B", true)
 	if string(info.forwardedBody) != "not json" || info.parsed {
 		t.Fatal("unparseable body must be forwarded as-is")
 	}

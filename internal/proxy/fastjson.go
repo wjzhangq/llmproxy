@@ -264,6 +264,19 @@ func (s *scanner) str() (int, bool) {
 	s.i++ // opening quote
 	n := 0
 	for s.i < len(s.b) {
+		// Fast path: a run of plain printable ASCII.
+		start := s.i
+		for s.i < len(s.b) {
+			c := s.b[s.i]
+			if c < 0x20 || c == '"' || c == '\\' || c >= utf8.RuneSelf {
+				break
+			}
+			s.i++
+		}
+		n += s.i - start
+		if s.i >= len(s.b) {
+			break
+		}
 		c := s.b[s.i]
 		switch {
 		case c == '"':
