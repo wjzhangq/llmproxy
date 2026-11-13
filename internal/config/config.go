@@ -96,6 +96,7 @@ type Config struct {
 	StripImages     bool     `yaml:"strip_images"`
 	InjectUsage     bool     `yaml:"inject_usage"`
 	LogQueueSize    int      `yaml:"log_queue_size"`
+	LogQueueBytes   ByteSize `yaml:"log_queue_bytes"`
 	UpstreamTimeout Duration `yaml:"upstream_timeout"`
 	Report          Report   `yaml:"report"`
 
@@ -115,6 +116,7 @@ func Default() *Config {
 		MaxBodyBytes:    10 << 20,
 		InjectUsage:     true,
 		LogQueueSize:    10000,
+		LogQueueBytes:   512 << 20,
 		UpstreamTimeout: Duration(600 * time.Second),
 		Report: Report{
 			Enabled: true,
@@ -246,6 +248,9 @@ func (c *Config) Finalize(requireUpstream bool) error {
 	c.Location = loc
 	if c.LogQueueSize <= 0 {
 		c.LogQueueSize = 10000
+	}
+	if c.LogQueueBytes <= 0 {
+		c.LogQueueBytes = 512 << 20
 	}
 	if c.MaxBodyBytes <= 0 {
 		c.MaxBodyBytes = 10 << 20

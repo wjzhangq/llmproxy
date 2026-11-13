@@ -37,6 +37,7 @@ func runServe(cfg *config.Config, stdout, stderr io.Writer) int {
 		Dir:           cfg.LogDir,
 		Location:      cfg.Location,
 		QueueSize:     cfg.LogQueueSize,
+		QueueBytes:    int64(cfg.LogQueueBytes),
 		MaxBodyBytes:  int64(cfg.MaxBodyBytes),
 		StripImages:   cfg.StripImages,
 		RetentionDays: cfg.RetentionDays,

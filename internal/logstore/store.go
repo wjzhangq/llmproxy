@@ -20,9 +20,12 @@ import (
 
 // Options configures a Store.
 type Options struct {
-	Dir           string
-	Location      *time.Location
-	QueueSize     int
+	Dir       string
+	Location  *time.Location
+	QueueSize int
+	// QueueBytes bounds the memory held by queued records (mostly request
+	// bodies); 0 means 512 MB.
+	QueueBytes    int64
 	MaxBodyBytes  int64
 	StripImages   bool
 	RetentionDays int
@@ -32,9 +35,27 @@ type Options struct {
 }
 
 type entry struct {
-	rec *metrics.Record
-	req *metrics.RequestLog
-	end time.Time
+	rec  *metrics.Record
+	req  *metrics.RequestLog
+	end  time.Time
+	size int64
+}
+
+// entryOverhead approximates the memory of a queued record besides its body.
+const entryOverhead = 1024
+
+func entrySize(req *metrics.RequestLog) int64 {
+	n := int64(entryOverhead)
+	if req != nil {
+		n += int64(len(req.Body))
+		for k, vs := range req.Header {
+			n += int64(len(k))
+			for _, v := range vs {
+				n += int64(len(v))
+			}
+		}
+	}
+	return n
 }
 
 // Store is an asynchronous, non-blocking log sink.
@@ -45,6 +66,7 @@ type Store struct {
 	closed  bool
 	done    chan struct{}
 	dropped atomic.Int64
+	queued  atomic.Int64 // bytes currently held by queued entries
 
 	day         string
 	metricsF    *dayFile
@@ -73,6 +95,9 @@ func Open(opts Options) (*Store, error) {
 	if opts.QueueSize <= 0 {
 		opts.QueueSize = 10000
 	}
+	if opts.QueueBytes <= 0 {
+		opts.QueueBytes = 512 << 20
+	}
 	if opts.ErrorLog == nil {
 		opts.ErrorLog = func(f string, a ...any) { fmt.Fprintf(os.Stderr, "llmproxy: "+f+"\n", a...) }
 	}
@@ -90,8 +115,9 @@ func Open(opts Options) (*Store, error) {
 	return s, nil
 }
 
-// Submit enqueues a record without blocking; when the queue is full the
-// record is dropped and counted.
+// Submit enqueues a record without blocking. When the queue is full, either
+// by count (QueueSize) or by memory (QueueBytes), the record is dropped and
+// counted.
 func (s *Store) Submit(rec *metrics.Record, req *metrics.RequestLog) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -99,12 +125,22 @@ func (s *Store) Submit(rec *metrics.Record, req *metrics.RequestLog) {
 		s.dropped.Add(1)
 		return
 	}
+	size := entrySize(req)
+	if s.queued.Add(size) > s.opts.QueueBytes {
+		s.queued.Add(-size)
+		s.dropped.Add(1)
+		return
+	}
 	select {
-	case s.ch <- entry{rec, req, s.opts.now()}:
+	case s.ch <- entry{rec, req, s.opts.now(), size}:
 	default:
+		s.queued.Add(-size)
 		s.dropped.Add(1)
 	}
 }
+
+// QueuedBytes returns the memory currently held by queued records.
+func (s *Store) QueuedBytes() int64 { return s.queued.Load() }
 
 // Dropped returns the total number of dropped records since start.
 func (s *Store) Dropped() int64 { return s.dropped.Load() }
@@ -161,6 +197,7 @@ func (s *Store) run() {
 }
 
 func (s *Store) write(e entry) {
+	defer s.queued.Add(-e.size)
 	day := e.end.In(s.opts.Location).Format("2006-01-02")
 	if day != s.day {
 		s.rotate(day)

@@ -16,6 +16,7 @@ max_body_bytes: 10MB                # per-request body log limit; longer bodies 
 strip_images: false                 # replace base64 images in logged bodies with a placeholder
 inject_usage: true                  # add stream_options.include_usage to streaming requests
 log_queue_size: 10000               # async log queue length; records are dropped (and counted) when full
+log_queue_bytes: 512MB              # memory cap for queued records (mostly request bodies); dropped when exceeded
 upstream_timeout: 600s              # upstream request timeout
 
 report:

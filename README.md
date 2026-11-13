@@ -64,6 +64,7 @@ llmproxy --version
 
 - 按 `timezone` 的 0 点切分（按写入时刻归属日期，跨零点的请求记在结束那天）；前一天的 metrics/requests 文件 gzip 压缩，超过 `retention_days` 删除。
 - 请求体超过 `max_body_bytes` 时只记前缀（字符串形式）并标 `truncated=true`；`strip_images: true` 时 base64 图片替换为 `<base64 omitted mime=... len=...>`。
+- 写日志走异步队列，队列按条数（`log_queue_size`）和内存（`log_queue_bytes`，默认 512 MB）双重限额，超出时丢弃并计入 `metrics/DATE.dropped`，不阻塞转发。
 - 用 request_id 关联指标和请求体，例如：`zgrep '"request_id":"a1b2c3d4' data/requests/2026-11-12.jsonl.gz`。
 
 ### 指标字段

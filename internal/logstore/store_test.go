@@ -128,3 +128,23 @@ func TestRetention(t *testing.T) {
 		t.Fatal("expired file kept")
 	}
 }
+
+func TestQueueBytesLimit(t *testing.T) {
+	dir := t.TempDir()
+	bw := &blockWriter{ch: make(chan struct{})}
+	s, _ := Open(Options{Dir: dir, QueueSize: 1000, QueueBytes: 3 << 20, Console: bw})
+	rec := &metrics.Record{RequestID: "x", StartTime: time.Now()}
+	big := make([]byte, 1<<20)
+	for i := 0; i < 10; i++ {
+		s.Submit(rec, &metrics.RequestLog{Body: big})
+	}
+	// at most 3 MB may be held: 2 queued + possibly 1 in the writer
+	if s.Dropped() < 7 || s.QueuedBytes() > 3<<20 {
+		t.Fatalf("dropped=%d queued=%d", s.Dropped(), s.QueuedBytes())
+	}
+	close(bw.ch)
+	s.Close()
+	if s.QueuedBytes() != 0 {
+		t.Fatalf("queued bytes not released: %d", s.QueuedBytes())
+	}
+}
