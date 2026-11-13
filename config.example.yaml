@@ -1,0 +1,27 @@
+# llmproxy configuration. Every key can be overridden by an environment
+# variable LLMPROXY_<KEY> (nested keys joined with "_", e.g.
+# LLMPROXY_REPORT_LLM_API_KEY) and the common ones by command line flags.
+# Priority: flags > environment > this file > defaults.
+
+listen: ":8080"                     # proxy listen address
+upstream: "http://127.0.0.1:8000"   # vLLM / SGLang address (required)
+upstream_model: "qwen3-32b"         # backend model name; every request's "model" is rewritten to it (required)
+validate_model: true                # warn at startup if upstream /v1/models does not list upstream_model
+console_stats: true                 # print one stats line per request to stdout
+
+log_dir: "./data"                   # logs and reports root directory
+timezone: "Asia/Shanghai"           # used for daily file split and statistics
+retention_days: 30                  # metrics/requests files older than this are deleted
+max_body_bytes: 10MB                # per-request body log limit; longer bodies keep a prefix and truncated=true
+strip_images: false                 # replace base64 images in logged bodies with a placeholder
+inject_usage: true                  # add stream_options.include_usage to streaming requests
+log_queue_size: 10000               # async log queue length; records are dropped (and counted) when full
+upstream_timeout: 600s              # upstream request timeout
+
+report:
+  enabled: true
+  cron: "10 0 * * *"                # daily at 00:10 (timezone above), reports the previous day
+  llm_base_url: ""                  # OpenAI-compatible endpoint for the AI report; default: upstream
+  llm_model: ""                     # default: upstream_model
+  llm_api_key: ""
+  prompt_file: ""                   # custom prompt; default: built-in internal/report/prompts/default.md

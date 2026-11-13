@@ -1,0 +1,77 @@
+version: 2
+
+project_name: llmproxy
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: llmproxy
+    main: ./cmd/llmproxy
+    binary: llmproxy
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w
+      - -X github.com/wjzhangq/llmproxy/internal/version.Version={{ .Version }}
+      - -X github.com/wjzhangq/llmproxy/internal/version.Commit={{ .ShortCommit }}
+      - -X github.com/wjzhangq/llmproxy/internal/version.BuildTime={{ .Date }}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - config.example.yaml
+      - internal/report/prompts/default.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+dockers:
+  - image_templates: ["ghcr.io/{{ .Env.GITHUB_REPOSITORY_OWNER }}/llmproxy:{{ .Tag }}-amd64"]
+    use: buildx
+    goarch: amd64
+    dockerfile: Dockerfile.release
+    build_flag_templates:
+      - --platform=linux/amd64
+      - --label=org.opencontainers.image.source={{ .GitURL }}
+      - --label=org.opencontainers.image.version={{ .Version }}
+      - --label=org.opencontainers.image.revision={{ .FullCommit }}
+  - image_templates: ["ghcr.io/{{ .Env.GITHUB_REPOSITORY_OWNER }}/llmproxy:{{ .Tag }}-arm64"]
+    use: buildx
+    goarch: arm64
+    dockerfile: Dockerfile.release
+    build_flag_templates:
+      - --platform=linux/arm64
+      - --label=org.opencontainers.image.source={{ .GitURL }}
+      - --label=org.opencontainers.image.version={{ .Version }}
+      - --label=org.opencontainers.image.revision={{ .FullCommit }}
+
+docker_manifests:
+  - name_template: "ghcr.io/{{ .Env.GITHUB_REPOSITORY_OWNER }}/llmproxy:{{ .Tag }}"
+    image_templates:
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY_OWNER }}/llmproxy:{{ .Tag }}-amd64"
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY_OWNER }}/llmproxy:{{ .Tag }}-arm64"
+  - name_template: "ghcr.io/{{ .Env.GITHUB_REPOSITORY_OWNER }}/llmproxy:latest"
+    image_templates:
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY_OWNER }}/llmproxy:{{ .Tag }}-amd64"
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY_OWNER }}/llmproxy:{{ .Tag }}-arm64"
+    skip_push: "{{ if .Prerelease }}true{{ end }}"
+
+release:
+  prerelease: auto

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	_ "time/tzdata" // embed zoneinfo so the static binary has no external deps
 
 	"github.com/wjzhangq/llmproxy/internal/config"
 	"github.com/wjzhangq/llmproxy/internal/version"

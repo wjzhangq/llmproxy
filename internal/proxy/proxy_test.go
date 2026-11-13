@@ -75,6 +75,7 @@ func fakeUpstream(t *testing.T, got chan<- upstreamReq) *httptest.Server {
 			return
 		}
 		if body["stream"] != true {
+			time.Sleep(5 * time.Millisecond)
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"id":"x","model":"backend-model","choices":[{"message":{"role":"assistant","content":"hello"}}],"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12}}`)
 			return
