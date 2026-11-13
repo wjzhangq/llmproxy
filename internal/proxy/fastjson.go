@@ -128,10 +128,15 @@ func (s *scanner) delta(info *chunkInfo) bool {
 
 // scanner is a minimal JSON walker over a byte slice.
 type scanner struct {
-	b   []byte
-	i   int
-	bad bool // input needs encoding/json semantics; fall back
+	b     []byte
+	i     int
+	bad   bool // input needs encoding/json semantics; fall back
+	depth int
 }
+
+// maxDepth bounds nesting like encoding/json does, so hostile input cannot
+// exhaust the stack.
+const maxDepth = 10000
 
 // key returns the index of the name key matches, or -1. encoding/json
 // matches keys case-insensitively, unescapes them and keeps the last of
@@ -182,9 +187,11 @@ func (s *scanner) null() bool {
 
 // object iterates the members of an object; key is the raw (escaped) key.
 func (s *scanner) object(member func(key []byte) bool) bool {
-	if s.peek() != '{' {
+	if s.peek() != '{' || s.depth >= maxDepth {
 		return false
 	}
+	s.depth++
+	defer func() { s.depth-- }()
 	s.i++
 	if s.peek() == '}' {
 		s.i++
@@ -219,9 +226,11 @@ func (s *scanner) object(member func(key []byte) bool) bool {
 }
 
 func (s *scanner) array(elem func() bool) bool {
-	if s.peek() != '[' {
+	if s.peek() != '[' || s.depth >= maxDepth {
 		return false
 	}
+	s.depth++
+	defer func() { s.depth-- }()
 	s.i++
 	if s.peek() == ']' {
 		s.i++

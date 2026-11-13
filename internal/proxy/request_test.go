@@ -136,3 +136,18 @@ func hasDupOrFoldKeys(s string) bool {
 
 func bytesReader(b []byte) *bytes.Reader { return bytes.NewReader(b) }
 func equalFold(a, b string) bool         { return strings.EqualFold(a, b) }
+
+func TestDeeplyNestedBodyDoesNotCrash(t *testing.T) {
+	deep := `{"messages":` + strings.Repeat("[", 5<<20) + strings.Repeat("]", 5<<20) + `}`
+	info := prepareRequest([]byte(deep), "B", true)
+	if info.parsed || len(info.forwardedBody) != len(deep) {
+		t.Fatal("over-deep body must be forwarded unchanged")
+	}
+	ok := `{"x":` + strings.Repeat("[", 9000) + strings.Repeat("]", 9000) + `}`
+	if !prepareRequest([]byte(ok), "B", true).parsed {
+		t.Fatal("nesting within the limit must be accepted")
+	}
+	if _, ok := scanChunk([]byte(`{"x":` + strings.Repeat("[", 20000) + strings.Repeat("]", 20000) + `}`)); ok {
+		t.Fatal("over-deep chunk must fall back")
+	}
+}
